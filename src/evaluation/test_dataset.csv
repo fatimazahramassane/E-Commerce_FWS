@@ -1,0 +1,11 @@
+query,expected_intent,expected_order_id,expected_needs_human
+"Je n'ai pas reçu ma commande #12345, je veux être remboursé",demande_remboursement,12345,True
+"Où en est ma commande #98765 ?",suivi_commande,98765,False
+"J'ai reçu un produit cassé, que faire ?",réclamation,None,False
+"Pouvez-vous m'envoyer la facture de la commande #54321 ?",autre,54321,False
+"Je souhaite retourner un article et être remboursé",demande_remboursement,None,True
+"Je ne suis pas satisfait du produit, je veux une compensation",réclamation,None,False
+"Mon colis est bloqué à la douane, aidez-moi",suivi_commande,None,False
+"Remboursez-moi immédiatement, c'est une arnaque",demande_remboursement,None,True
+"Quels sont vos délais de livraison ?",autre,None,False
+"Je veux modifier mon adresse de livraison pour la commande #11223",autre,11223,False
