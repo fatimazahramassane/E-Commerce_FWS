@@ -1,196 +1,304 @@
-
-import sys, os
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
+# src/ui/app.py — Interface Streamlit complète (workflow, RAG, HITL, historique)
+"""
+Lancement : streamlit run src/ui/app.py
+Depuis la racine du projet après pip install -r requirements.txt
+"""
+import sys
+import uuid
+from datetime import datetime, timezone
+from pathlib import Path
 
 import streamlit as st
-from src.graph.workflow import graph, new_thread_id
+from dotenv import load_dotenv
 from langgraph.types import Command
 
-# ── Page config ───────────────────────────────────────────────────────────────
-st.set_page_config(page_title="Support Client Intelligent", layout="wide", page_icon="🤖")
-st.title("🤖 Support Client Intelligent")
+# Racine projet
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(PROJECT_ROOT))
 
-# ── Session state init ─────────────────────────────────────────────────────────
-def _init_session():
+load_dotenv(PROJECT_ROOT / ".env")
+
+from src.graph import get_compiled_graph, get_thread_config  # noqa: E402
+from src.rag.ingest import ingest_policy  # noqa: E402
+
+# ——— Configuration page ———
+st.set_page_config(
+    page_title="Support Client E-commerce — Multi-Agent",
+    page_icon="🛒",
+    layout="wide",
+    initial_sidebar_state="expanded",
+)
+
+HITL_TIMEOUT_SECONDS = 300
+
+
+def init_session_state():
+    """Initialise thread_id persistant et historique (critère checkpointer RETAL)."""
     if "thread_id" not in st.session_state:
-        st.session_state.thread_id = new_thread_id()
-    if "events" not in st.session_state:
-        st.session_state.events = []
-    if "interrupted" not in st.session_state:
-        st.session_state.interrupted = False
-    if "interrupt_payload" not in st.session_state:
-        st.session_state.interrupt_payload = None
-    # ✅ ENHANCEMENT: Stocker la réponse finale séparément pour l'afficher en évidence
-    if "final_response" not in st.session_state:
-        st.session_state.final_response = None
+        st.session_state.thread_id = str(uuid.uuid4())
+    if "chat_history" not in st.session_state:
+        st.session_state.chat_history = []
+    if "pending_hitl" not in st.session_state:
+        st.session_state.pending_hitl = None
+    if "last_snapshot" not in st.session_state:
+        st.session_state.last_snapshot = None
+    if "rag_ready" not in st.session_state:
+        st.session_state.rag_ready = False
 
-_init_session()
 
-# ── Helpers ────────────────────────────────────────────────────────────────────
-def _config():
-    return {"configurable": {"thread_id": st.session_state.thread_id}}
+def ensure_rag_index():
+    """Ingère la politique au premier chargement."""
+    if not st.session_state.rag_ready:
+        with st.spinner("Indexation RAG (ChromaDB + embeddings)…"):
+            try:
+                ingest_policy(force=False)
+                st.session_state.rag_ready = True
+            except Exception as exc:
+                st.error(f"Erreur ingestion RAG : {exc}")
 
-def _run_sync(input_or_command):
-    """Run graph synchronously and collect events + final response."""
-    events = []
-    interrupted = False
-    interrupt_payload = None
-    final_response = None
 
-    for event in graph.stream(input_or_command, _config(), stream_mode="updates"):
-        if "__interrupt__" in event:
-            interrupted = True
-            interrupt_payload = event["__interrupt__"]
-            break
-        events.append(event)
-
-        # ✅ ENHANCEMENT: Extraire la réponse finale dès qu'elle apparaît
-        for node_data in event.values():
-            if isinstance(node_data, dict) and node_data.get("final_response"):
-                final_response = node_data["final_response"]
-
-    return events, interrupted, interrupt_payload, final_response
-
-def _display_events(events):
-    """Affiche les étapes du workflow de façon claire."""
-    NODE_LABELS = {
-        "classifier":       ("🏷️", "Classification de l'intention"),
-        "rag_verifier":     ("📚", "Vérification RAG"),
-        "human_validation": ("👤", "Validation humaine"),
-        "resolver":         ("✍️", "Génération de la réponse"),
-        "responder":        ("📤", "Envoi de la réponse"),
-    }
-    for evt in events:
-        for node, data in evt.items():
-            if node.startswith("_"):
-                continue
-            icon, label = NODE_LABELS.get(node, ("📌", node))
-            with st.expander(f"{icon} {label}", expanded=False):
-                st.json(data)
-
-# ── Sidebar ────────────────────────────────────────────────────────────────────
-with st.sidebar:
-    st.header("📝 Nouvelle demande")
-    user_query = st.text_area(
-        "Message du client :",
-        height=120,
-        placeholder="Ex : Je n'ai pas reçu ma commande #12345, je veux être remboursé",
+def render_sidebar():
+    """Barre latérale : config, thread, reset."""
+    st.sidebar.header("Configuration")
+    api_ok = bool(__import__("os").environ.get("GROQ_API_KEY"))
+    st.sidebar.markdown(
+        f"**GROQ_API_KEY** : {' Définie' if api_ok else ' Manquante'}"
     )
+    st.sidebar.text_input(
+        "Thread ID (checkpointer)",
+        value=st.session_state.thread_id,
+        disabled=True,
+        help="Identifiant persistant MemorySaver pour reprise HITL",
+    )
+    if st.sidebar.button("🔄 Nouvelle conversation"):
+        st.session_state.thread_id = str(uuid.uuid4())
+        st.session_state.chat_history = []
+        st.session_state.pending_hitl = None
+        st.session_state.last_snapshot = None
+        st.rerun()
+    st.sidebar.markdown("---")
+    st.sidebar.markdown(
+        """
+        **Workflow LangGraph**
+        1. Classifier (Pydantic)
+        2. RAG Verifier
+        3. HITL (si remboursement + order_id)
+        4. Resolver
+        5. Responder
+        """
+    )
+
+
+def extract_interrupt_payload(snapshot) -> dict | None:
+    """Extrait le payload HITL depuis l'état LangGraph."""
+    if not snapshot:
+        return None
+    interrupts = getattr(snapshot, "interrupts", None) or []
+    if interrupts:
+        val = interrupts[0].value if hasattr(interrupts[0], "value") else interrupts[0]
+        return val if isinstance(val, dict) else {"raw": val}
+    # Fallback via tasks (anciennes versions)
+    tasks = getattr(snapshot, "tasks", None) or []
+    for task in tasks:
+        if getattr(task, "interrupts", None):
+            intr = task.interrupts[0]
+            return intr.value if hasattr(intr, "value") else intr
+    return None
+
+
+def run_graph_input(user_message: str, is_resume: bool = False, resume_value=None):
+    """Invoque le graphe (nouveau message ou reprise HITL)."""
+    graph = get_compiled_graph()
+    config = get_thread_config(st.session_state.thread_id)
+
+    if is_resume and resume_value is not None:
+        return graph.invoke(Command(resume=resume_value), config=config)
+
+    return graph.invoke(
+        {"user_message": user_message, "workflow_log": []},
+        config=config,
+    )
+
+
+def process_user_message(user_message: str):
+    """Traite un message utilisateur et gère les interruptions HITL."""
+    try:
+        result = run_graph_input(user_message)
+        graph = get_compiled_graph()
+        config = get_thread_config(st.session_state.thread_id)
+        snapshot = graph.get_state(config)
+        st.session_state.last_snapshot = snapshot
+
+        payload = extract_interrupt_payload(snapshot)
+        if payload:
+            st.session_state.pending_hitl = payload
+            return None, payload
+
+        final = result.get("final_response") if isinstance(result, dict) else None
+        if not final and snapshot and snapshot.values:
+            final = snapshot.values.get("final_response")
+        return final, None
+    except Exception as exc:
+        st.error(f"Erreur exécution graphe : {exc}")
+        return None, None
+
+
+def resume_hitl(decision: str):
+    """Reprise via Command(resume=...) — critère HITL RETAL."""
+    approved = decision == "approved"
+    resume_payload = {"decision": decision, "approved": approved}
+    try:
+        graph = get_compiled_graph()
+        config = get_thread_config(st.session_state.thread_id)
+        result = graph.invoke(Command(resume=resume_payload), config=config)
+        snapshot = graph.get_state(config)
+        st.session_state.last_snapshot = snapshot
+        st.session_state.pending_hitl = None
+
+        final = result.get("final_response") if isinstance(result, dict) else None
+        if not final and snapshot.values:
+            final = snapshot.values.get("final_response")
+        return final
+    except Exception as exc:
+        st.error(f"Erreur reprise HITL : {exc}")
+        return None
+
+
+def render_workflow_expanders(snapshot):
+    """Expanders temps réel : étape, RAG, HITL, réponse."""
+    values = snapshot.values if snapshot and snapshot.values else {}
+
+    with st.expander("📍 Étape actuelle", expanded=True):
+        st.write(values.get("current_step", "—"))
+        logs = values.get("workflow_log") or []
+        if logs:
+            st.code("\n".join(logs[-8:]), language=None)
+
+    with st.expander("📚 Contexte RAG"):
+        chunks = values.get("rag_chunks") or []
+        st.caption(f"{len(chunks)} chunk(s) récupéré(s) (top_k=3)")
+        st.text_area(
+            "Contexte injecté",
+            value=values.get("rag_context", "—"),
+            height=150,
+            disabled=True,
+        )
+
+    with st.expander("👤 Décision HITL"):
+        if values.get("human_decision"):
+            approved = values.get("human_approved")
+            st.success("Approuvé") if approved else st.warning("Refusé")
+            st.json(
+                {
+                    "decision": values.get("human_decision"),
+                    "approved": approved,
+                    "payload": values.get("human_payload"),
+                }
+            )
+        else:
+            st.info("Aucune validation humaine sur ce tour (bypass ou en attente).")
+
+    with st.expander("✅ Classification (Pydantic)"):
+        st.json(
+            {
+                "intent": values.get("intent"),
+                "order_id": values.get("order_id"),
+                "confidence": values.get("confidence"),
+                "needs_human": values.get("needs_human"),
+                "error": values.get("error"),
+            }
+        )
+
+
+def render_hitl_panel(payload: dict):
+    """UI HITL : boutons Approuver / Refuser + payload + timeout."""
+    st.warning("⏸️ Validation financière requise (Human-in-the-Loop)")
+    st.markdown(
+        f"**Commande** : `{payload.get('order_id', 'N/A')}`  \n"
+        f"**Message client** : {payload.get('user_message', '')[:200]}"
+    )
+    st.info(payload.get("message", "Validation remboursement"))
+    st.caption(
+        f"Timeout suggéré : {payload.get('timeout_seconds', HITL_TIMEOUT_SECONDS)}s — "
+        f"Horodatage : {payload.get('timestamp_utc', 'N/A')}"
+    )
+
+    with st.expander("Payload complet à valider"):
+        st.json(payload)
 
     col1, col2 = st.columns(2)
     with col1:
-        submit = st.button("Envoyer", type="primary", use_container_width=True)
-    with col2:
-        if st.button("Réinitialiser", use_container_width=True):
-            st.session_state.thread_id = new_thread_id()
-            st.session_state.events = []
-            st.session_state.interrupted = False
-            st.session_state.interrupt_payload = None
-            st.session_state.final_response = None
-            st.rerun()
-
-    st.markdown("---")
-    st.caption(f"Thread : `{st.session_state.thread_id}`")
-
-# ── Main area ──────────────────────────────────────────────────────────────────
-
-if submit and user_query.strip():
-    st.session_state.events = []
-    st.session_state.interrupted = False
-    st.session_state.interrupt_payload = None
-    st.session_state.final_response = None
-
-    initial_state = {
-        "query": user_query.strip(),
-        "intent": None,
-        "order_id": None,
-        "retrieved_context": None,
-        "proposed_response": None,
-        "proposed_action": None,
-        "requires_human": False,
-        "final_response": None,
-        "approved": None,
-        "error": None,
-    }
-
-    with st.spinner("Traitement en cours…"):
-        new_events, interrupted, payload, final = _run_sync(initial_state)
-
-    st.session_state.events.extend(new_events)
-    st.session_state.interrupted = interrupted
-    st.session_state.interrupt_payload = payload
-    if final:
-        st.session_state.final_response = final
-
-    st.rerun()
-
-# ── Workflow steps ─────────────────────────────────────────────────────────────
-if st.session_state.events or st.session_state.interrupted:
-    st.header("🔄 Déroulement du traitement")
-    _display_events(st.session_state.events)
-
-# ── Final response banner ──────────────────────────────────────────────────────
-# ✅ ENHANCEMENT: La réponse finale est maintenant affichée de façon proéminente
-# plutôt que d'être enfouie dans un expander JSON du nœud "responder".
-if st.session_state.final_response and not st.session_state.interrupted:
-    st.markdown("---")
-    st.header("💬 Réponse envoyée au client")
-    st.success(st.session_state.final_response)
-
-# ── Human-in-the-loop panel ────────────────────────────────────────────────────
-if st.session_state.interrupted and st.session_state.interrupt_payload:
-    st.markdown("---")
-    st.header("🔐 Validation humaine requise")
-
-    payload = st.session_state.interrupt_payload
-    details = {}
-    try:
-        for item in payload:
-            val = item.value if hasattr(item, "value") else item
-            if isinstance(val, dict):
-                details = val
-                break
-    except Exception:
-        pass
-
-    if details:
-        st.warning(f"**{details.get('message', 'Action critique détectée')}**")
-        st.write(f"**Détails :** {details.get('details', 'N/A')}")
-        st.write(f"**Action :** `{details.get('action', 'refund')}`")
-    else:
-        st.warning("Une validation humaine est requise pour continuer.")
-
-    col1, col2, _ = st.columns([1, 1, 3])
-
-    with col1:
-        if st.button("✅ Approuver", type="primary"):
-            with st.spinner("Reprise…"):
-                new_events, interrupted, payload, final = _run_sync(
-                    Command(resume={"approved": True})
-                )
-            st.session_state.events.extend(new_events)
-            st.session_state.interrupted = interrupted
-            st.session_state.interrupt_payload = payload
+        if st.button("✅ Approuver", type="primary", use_container_width=True):
+            final = resume_hitl("approved")
             if final:
-                st.session_state.final_response = final
-            if not interrupted:
-                st.success("✅ Remboursement approuvé — traitement terminé.")
-            st.rerun()
-
-    with col2:
-        if st.button("❌ Refuser"):
-            with st.spinner("Reprise…"):
-                new_events, interrupted, payload, final = _run_sync(
-                    Command(resume={"approved": False})
+                st.session_state.chat_history.append(
+                    {"role": "assistant", "content": final, "hitl": "approved"}
                 )
-            st.session_state.events.extend(new_events)
-            st.session_state.interrupted = interrupted
-            st.session_state.interrupt_payload = payload
+            st.rerun()
+    with col2:
+        if st.button("❌ Refuser", use_container_width=True):
+            final = resume_hitl("refused")
             if final:
-                st.session_state.final_response = final
-            if not interrupted:
-                st.info("Demande refusée — réponse envoyée au client.")
+                st.session_state.chat_history.append(
+                    {"role": "assistant", "content": final, "hitl": "refused"}
+                )
             st.rerun()
 
-elif not st.session_state.events and not st.session_state.interrupted:
-    st.info("Entrez un message dans la barre latérale et cliquez sur **Envoyer** pour démarrer.")
+
+def main():
+    init_session_state()
+    ensure_rag_index()
+    render_sidebar()
+
+    st.title(" Support Client E-commerce -- F W S -- ")
+    st.markdown(
+        "Suivi commande · Remboursement · Réclamation — "
+        "LangGraph + RAG + HITL "
+    )
+
+    # Historique
+    for entry in st.session_state.chat_history:
+        with st.chat_message(entry["role"]):
+            st.markdown(entry["content"])
+            if entry.get("hitl"):
+                st.caption(f"Décision HITL : {entry['hitl']}")
+
+    # Panneau HITL en attente
+    if st.session_state.pending_hitl:
+        render_hitl_panel(st.session_state.pending_hitl)
+
+    # Saisie utilisateur
+    user_input = st.chat_input("Décrivez votre demande (ex: remboursement ORD-12345)…")
+    if user_input:
+        st.session_state.chat_history.append({"role": "user", "content": user_input})
+        with st.chat_message("user"):
+            st.markdown(user_input)
+
+        with st.spinner("Traitement par le graphe multi-agent…"):
+            final, hitl_payload = process_user_message(user_input)
+
+        if hitl_payload:
+            st.session_state.pending_hitl = hitl_payload
+            render_hitl_panel(hitl_payload)
+        elif final:
+            st.session_state.chat_history.append(
+                {"role": "assistant", "content": final}
+            )
+            with st.chat_message("assistant"):
+                st.markdown(final)
+
+    # Expanders workflow (dernier état)
+    snapshot = st.session_state.last_snapshot
+    if snapshot:
+        st.markdown("---")
+        st.subheader("Détail du workflow")
+        render_workflow_expanders(snapshot)
+
+        values = snapshot.values or {}
+        if values.get("final_response") and not st.session_state.pending_hitl:
+            st.success("Réponse finale")
+            st.markdown(values["final_response"])
+
+
+if __name__ == "__main__":
+    main()

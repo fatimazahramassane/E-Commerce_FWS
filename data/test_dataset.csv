@@ -1,0 +1,11 @@
+Query,Intent,Order_ID,Expected_needs_human
+"Où en est ma commande ORD-12345 ?",suivi_commande,ORD-12345,False
+"Je veux un remboursement pour la commande ORD-99887",demande_remboursement,ORD-99887,True
+"Mon colis est arrivé abîmé, que faire ?",reclamation,,False
+"Bonjour, statut de ORD-55421 svp",suivi_commande,ORD-55421,False
+"Remboursement commande ORD-77210 produit défectueux",demande_remboursement,ORD-77210,True
+"Quels sont vos horaires d'ouverture ?",autre,,False
+"Réclamation sans numéro de commande",reclamation,,False
+"Suivi ORD-00001 merci",suivi_commande,ORD-00001,False
+"Demande remboursement ORD-33333 article 5 jours",demande_remboursement,ORD-33333,True
+"Produit non conforme ORD-11223 remboursement",demande_remboursement,ORD-11223,True
