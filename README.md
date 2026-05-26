@@ -22,4 +22,5 @@ Le système s'appuie sur un `StateGraph` persistant qui gère les transitions en
 ```bash
 git clone [https://github.com/fatimazahramassane/E-Commerce_FWS.git](https://github.com/fatimazahramassane/E-Commerce_FWS.git)
 cd E-Commerce_FWS
-pip install -r requirements.txt```
+### 2. Installer les dependances
+pip install -r requirements.txt
