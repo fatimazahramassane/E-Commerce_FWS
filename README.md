@@ -4,7 +4,10 @@ Projet Master SDIA — conforme aux 5 exigences du Prof. RETAL : LangGraph multi
 
 **Équipe** : • Fatimazahra Massane   • Salma Majri Wijdane Aaroub 
 **Encadrant** : Prof. RETAL Sara  
-**Vidéo** : [recordd.mp4](./recordd.mp4)  https://github.com/user-attachments/assets/ec23917b-2990-4b6b-be42-539d08754eea
+
+**Vidéo** : https://github.com/user-attachments/assets/ec23917b-2990-4b6b-be42-539d08754eea
+
+**Vidéo** : [recordd.mp4](./recordd.mp4)  
 **Rapport PDF** : Disponible sur Google Classroom
 
 ---
