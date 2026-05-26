@@ -25,3 +25,5 @@ git clone [https://github.com/fatimazahramassane/E-Commerce_FWS.git](https://git
 cd E-Commerce_FWS
 ### 2. Installer les dependances
 pip install -r requirements.txt
+### 3. Executer
+streamlit run src/ui/app.py
