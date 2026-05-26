@@ -18,8 +18,9 @@ Le système s'appuie sur un `StateGraph` persistant qui gère les transitions en
 
 ##  Installation et Configuration
 
-### 1. Cloner le projet
+
 ```bash
+### 1. Cloner le projet
 git clone [https://github.com/fatimazahramassane/E-Commerce_FWS.git](https://github.com/fatimazahramassane/E-Commerce_FWS.git)
 cd E-Commerce_FWS
 ### 2. Installer les dependances
