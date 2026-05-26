@@ -211,7 +211,7 @@ Checkpointer : MemorySaver + thread_id persistant dans st.session_state.
 ## Licence / usage pédagogique
 
 Projet académique Master SDIA — usage local, Replit ou démo.  
-Dépôt GitHub : https://github.com/fatimazahramassane/E-Commerce
+Dépôt GitHub :[https://github.com/fatimazahramassane/E-Commerce_FWS]
 
 ---
 
